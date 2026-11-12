@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sexta-Feira</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at 50% 38%, #3a4350 0%, #161b23 55%, #07090d 100%);
+    color: #dbe6f2; font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+  #topo { position: fixed; top: 14px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: baseline; font-weight: 200; pointer-events: none; }
+  #relogio { font-size: 1.7rem; letter-spacing: 4px; }
+  #data { font-size: .85rem; opacity: .6; }
+  #rodape { position: fixed; left: 0; right: 0; bottom: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; padding: 0 16px; }
+  #status { font-size: .85rem; opacity: .7; min-height: 1.2em; }
+  #resposta {
+    width: min(820px, 100%); min-height: 70px; padding: 12px 22px; border-radius: 14px;
+    background: rgba(10, 14, 20, .55); backdrop-filter: blur(10px); border: 1px solid rgba(160, 200, 255, .22);
+    font-size: 1.2rem; line-height: 1.45; text-align: center; display: flex; align-items: center; justify-content: center;
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="cena"></canvas>
+<div id="topo"><div id="relogio">00:00</div><div id="data"></div></div>
+<div id="rodape">
+  <div id="status">Carregando o rosto 3D…</div>
+  <div id="resposta">Olá! Eu sou a Sexta-Feira. Toque na tela para me ativar.</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ====== CONFIGURAÇÃO ======
+const URL_DA_IA = 'https://sextafeiracelebro.enrikerissardi1.workers.dev';
+const MODELOS = ['facecap.glb', 'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/facecap.glb'];
+const $ = id => document.getElementById(id);
+
+// ====== CENA ======
+const canvas = $('cena');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.localClippingEnabled = true;
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(22, 1, 0.1, 100);
+const luzFrio = new THREE.DirectionalLight(0x6fb8ff, 2.2); luzFrio.position.set(-3, 1.5, 2);
+const luzQuente = new THREE.DirectionalLight(0xffb066, 1.1); luzQuente.position.set(3, 0.5, 2);
+const luzTopo = new THREE.DirectionalLight(0xffffff, 1.2); luzTopo.position.set(0, 3, 3);
+scene.add(luzFrio, luzQuente, luzTopo);
+
+// partículas douradas flutuando
+const bolinha = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d'), r = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  r.addColorStop(0, '#fff'); r.addColorStop(.35, '#ffc470'); r.addColorStop(1, 'rgba(255,170,60,0)');
+  g.fillStyle = r; g.fillRect(0, 0, 32, 32); return new THREE.CanvasTexture(c);
+})();
+const N = 140, pos = new Float32Array(N * 3), vel = [];
+for (let i = 0; i < N; i++) { pos.set([(Math.random() - .5) * 5, (Math.random() - .5) * 3.5, -1 + Math.random() * 2.5], i * 3); vel.push(.0004 + Math.random() * .0012); }
+const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ map: bolinha, size: 14, sizeAttenuation: false, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })));
+
+function ajusta() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', ajusta); ajusta();
+
+// ====== ROSTO ======
+const pivo = new THREE.Group(); scene.add(pivo);
+const malhas = [], clones = [];
+let nomes = {}; // nome do morph -> índice
+const atual = {}, alvo = {};
+
+const ktx2 = new KTX2Loader().setTranscoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/basis/').detectSupport(renderer);
+const loader = new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
+
+function carregar(i = 0) {
+  loader.load(MODELOS[i], gltf => {
+    const modelo = gltf.scene; pivo.add(modelo);
+    modelo.traverse(o => { if (o.isMesh && o.morphTargetDictionary) { malhas.push(o); Object.assign(nomes, o.morphTargetDictionary); } });
+    const cabeca = malhas.find(m => m.name.toLowerCase().includes('head')) || malhas[0];
+
+    // pele de porcelana
+    cabeca.material = new THREE.MeshPhysicalMaterial({
+      color: 0xeef1f5, roughness: .28, metalness: .05, clearcoat: 1, clearcoatRoughness: .12,
+      sheen: .6, sheenColor: new THREE.Color(0xbcd4ff), envMapIntensity: .9
+    });
+    // metade do rosto em malha holográfica azul
+    const plano = new THREE.Plane(new THREE.Vector3(1, 0, 0), 0);
+    const fio = cabeca.clone();
+    fio.material = new THREE.MeshBasicMaterial({ color: 0x39b9ff, wireframe: true, transparent: true, opacity: .55, blending: THREE.AdditiveBlending, depthWrite: false, clippingPlanes: [plano] });
+    fio.scale.multiplyScalar(1.004); cabeca.parent.add(fio); clones.push(fio);
+
+    // enquadra o rosto automaticamente
+    modelo.updateMatrixWorld(true);
+    const caixa = new THREE.Box3().setFromObject(modelo), c = caixa.getCenter(new THREE.Vector3()), t = caixa.getSize(new THREE.Vector3());
+    modelo.position.sub(c);
+    camera.position.set(0, 0, (t.y / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.25);
+    $('status').textContent = 'Toque na tela para ativar';
+    requestAnimationFrame(loop);
+  }, undefined, () => {
+    if (i + 1 < MODELOS.length) carregar(i + 1);
+    else $('resposta').textContent = 'Não consegui carregar o rosto 3D. Abra pelo link do GitHub Pages e confira se o arquivo facecap.glb foi enviado junto com o index.html.';
+  });
+}
+carregar();
+
+// ====== EXPRESSÕES (blendshapes) ======
+const par = (n, v) => ({ [n + '_L']: v, [n + '_R']: v });
+const EXP = {
+  neutro:   {},
+  feliz:    { ...par('mouthSmile', .65), ...par('cheekSquint', .45), ...par('browOuterUp', .25) },
+  ouvindo:  { browInnerUp: .3, ...par('eyeWide', .35) },
+  pensando: { browInnerUp: .35, browDown_L: .55, browOuterUp_R: .5, mouthPress_L: .3, mouthPress_R: .3, mouthRight: .25 },
+  surpreso: { browInnerUp: .85, ...par('browOuterUp', .8), ...par('eyeWide', .9), jawOpen: .3 },
+  triste:   { browInnerUp: .85, ...par('mouthFrown', .65), ...par('browDown', .2), mouthLowerDown_L: .1 }
+};
+let falando = false, pulso = 0, proxPisca = 1500, piscada = 0;
+function expressao(n) { for (const k in alvo) alvo[k] = 0; Object.assign(alvo, EXP[n]); }
+
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (t > proxPisca) { piscada = 1; proxPisca = t + 2200 + Math.random() * 3500; }
+  piscada = Math.max(0, piscada - .16);
+
+  const voz = {};
+  if (falando) {
+    voz.jawOpen = .06 + .5 * pulso + .2 * Math.abs(Math.sin(t / 60) * Math.sin(t / 140));
+    voz.mouthFunnel = .35 * Math.abs(Math.sin(t / 190));
+    voz.mouthStretch_L = voz.mouthStretch_R = .2 * Math.abs(Math.sin(t / 260 + 1));
+  }
+  const b = Math.sin(piscada * Math.PI);
+  const total = { ...voz, eyeBlink_L: b, eyeBlink_R: b };
+  const chaves = new Set([...Object.keys(alvo), ...Object.keys(atual), ...Object.keys(total)]);
+  for (const k of chaves) {
+    const a = k in total ? Math.max(total[k], alvo[k] || 0) : (alvo[k] || 0);
+    atual[k] = (atual[k] || 0) + (a - (atual[k] || 0)) * (k.startsWith('eyeBlink') ? .6 : .22);
+    const idx = nomes[k]; if (idx === undefined) continue;
+    for (const m of [...malhas, ...clones]) if (m.morphTargetInfluences) m.morphTargetInfluences[idx] = atual[k];
+  }
+  pulso *= .9;
+
+  pivo.rotation.y = Math.sin(t / 2600) * .16;
+  pivo.rotation.x = Math.sin(t / 3300) * .04;
+  pivo.position.y = Math.sin(t / 1400) * .005;
+  const p = geo.attributes.position;
+  for (let i = 0; i < N; i++) { p.array[i * 3 + 1] += vel[i]; if (p.array[i * 3 + 1] > 1.8) p.array[i * 3 + 1] = -1.8; }
+  p.needsUpdate = true;
+  renderer.render(scene, camera);
+}
+
+// ====== RELÓGIO ======
+function relogio() {
+  const a = new Date();
+  $('relogio').textContent = a.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  $('data').textContent = a.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+}
+setInterval(relogio, 1000); relogio();
+
+// ====== VOZ: falar ======
+let vozPT = null;
+const escolheVoz = () => { vozPT = speechSynthesis.getVoices().find(v => v.lang === 'pt-BR') || null; };
+speechSynthesis.onvoiceschanged = escolheVoz; escolheVoz();
+
+function humor(txt) {
+  if (/desculp|erro|não consegui|nao consegui|infelizmente/i.test(txt)) return 'triste';
+  if (/!|haha|kkk|legal|ótimo|otimo|claro|com prazer/i.test(txt)) return 'feliz';
+  if (/\?\s*$/.test(txt)) return 'surpreso';
+  return 'feliz';
+}
+function falar(txt) {
+  $('resposta').textContent = txt;
+  speechSynthesis.cancel();
+  const f = new SpeechSynthesisUtterance(txt);
+  f.lang = 'pt-BR'; f.rate = 1.05; if (vozPT) f.voice = vozPT;
+  f.onstart = () => { falando = true; expressao(humor(txt)); $('status').textContent = 'Falando'; };
+  f.onboundary = () => { pulso = 1; };
+  const fim = () => { falando = false; expressao('neutro'); $('status').textContent = 'Diga "Sexta-feira" e o seu pedido'; };
+  f.onend = fim; f.onerror = fim;
+  speechSynthesis.speak(f);
+}
+
+// ====== RESPOSTAS ======
+async function responder(pergunta) {
+  const p = pergunta.toLowerCase();
+  if (/que horas/.test(p)) return 'Agora são ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + '.';
+  if (/que dia|data de hoje/.test(p)) return 'Hoje é ' + new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }) + '.';
+  try {
+    const r = await fetch(URL_DA_IA, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pergunta }) });
+    const d = await r.json();
+    return d.resposta || 'Não consegui pensar numa resposta agora.';
+  } catch (e) { return 'Não consegui falar com o meu cérebro na nuvem agora.'; }
+}
+
+// ====== VOZ: ouvir ======
+const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let ativo = false;
+if (!Rec) {
+  $('resposta').textContent = 'Este navegador não suporta reconhecimento de voz. Use o Chrome.';
+} else {
+  const rec = new Rec();
+  rec.lang = 'pt-BR'; rec.continuous = true; rec.interimResults = false;
+  rec.onstart = () => { if (!falando) { expressao('ouvindo'); $('status').textContent = 'Diga "Sexta-feira" e o seu pedido'; } };
+  rec.onend = () => { if (ativo) setTimeout(() => { try { rec.start(); } catch (e) {} }, 300); };
+  rec.onerror = () => {};
+  rec.onresult = async ev => {
+    if (falando) return;
+    const txt = ev.results[ev.results.length - 1][0].transcript.trim().toLowerCase();
+    if (!/sexta[- ]feira/.test(txt)) return;
+    const pedido = txt.replace(/sexta[- ]feira[,.]?/g, '').trim();
+    expressao('pensando'); $('status').textContent = 'Pensando';
+    falar(await responder(pedido || 'oi'));
+  };
+  canvas.addEventListener('click', () => {
+    if (ativo) return;
+    ativo = true; rec.start(); falar('Sistemas ativos. Estou ouvindo.');
+  });
+}
+</script>
+</body>
+</html>
